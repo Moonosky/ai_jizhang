@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(timeout 8 streamlit run app.py --server.headless true)"
+    ]
+  }
+}
