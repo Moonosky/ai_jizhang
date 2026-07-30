@@ -7,8 +7,15 @@ import pandas as pd
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+# 北京时间（UTC+8）
+CN_TZ = timezone(timedelta(hours=8))
+
+def now_cn():
+    """返回当前北京时间"""
+    return datetime.now(CN_TZ).replace(tzinfo=None)
 from openai import OpenAI
 import plotly.graph_objects as go
 
@@ -174,7 +181,7 @@ def parse_input(user_text: str, base_date: datetime = None) -> Optional[dict]:
         return None
 
     if base_date is None:
-        base_date = datetime.now()
+        base_date = now_cn()
     now = base_date
     time_hint = f"当前时间是 {now.strftime('%H:%M')}，日期是 {now.strftime('%Y-%m-%d')}。"
 
@@ -584,7 +591,7 @@ with st.sidebar:
     # 全局汇总卡片（无论在哪个页面都可见）
     records = st.session_state.records
     if len(records) > 0:
-        now = datetime.now()
+        now = now_cn()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = today_start - timedelta(days=now.weekday())
 
@@ -643,7 +650,7 @@ def get_filtered_records(records_df, start_date=None, end_date=None,
 # 页面一：🧾 记账
 # ============================================================
 if page == "🧾 记账":
-    now = datetime.now()
+    now = now_cn()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = today_start - timedelta(days=now.weekday())
 
@@ -709,7 +716,7 @@ if page == "🧾 记账":
         edit_dialog(edit_record.iloc[0], edit_id)
 
     # ---- 聊天式记账（微信风格：用户右，AI 左） ----
-    today_start_dt = datetime.combine(datetime.now().date(), datetime.min.time())
+    today_start_dt = datetime.combine(now_cn().date(), datetime.min.time())
     today_records_list = records[pd.to_datetime(records["timestamp"]) >= today_start_dt]
 
     if len(st.session_state.chat_history) > 0:
@@ -996,7 +1003,7 @@ elif page == "📊 记账统计":
     if len(records) == 0:
         st.info("👋 还没有记账记录，去「记账」页开始记第一笔吧！有了数据才能统计哦。")
     else:
-        now = datetime.now()
+        now = now_cn()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = today_start - timedelta(days=now.weekday())
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
