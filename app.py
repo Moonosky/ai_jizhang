@@ -481,8 +481,9 @@ def update_record(record_id: str, new_data: dict):
 @st.dialog("✏️ 编辑记录", width="large")
 def edit_dialog(edit_row, edit_id):
     """编辑弹窗 - Streamlit 原生 Dialog，叠加在原界面上方"""
-    # 标记弹窗已渲染：如果 ✕ 关闭弹窗，函数体不执行，此标记为 False → 调用方可清空 editing_id
-    st.session_state._edit_dialog_rendered = True
+    # 签收当前编辑请求：弹窗真正展示时，记录已处理的版本号
+    # 若弹窗被 ✕ 关闭后来到新一轮，版本号已签收 → 调用方检测到后清空 editing_id
+    st.session_state._edit_fulfilled_ver = st.session_state.get("_edit_request_ver", 0)
 
     # ---- 金额 & 类型 ----
     col_a, col_b = st.columns(2)
@@ -689,12 +690,13 @@ if page == "🧾 记账":
         if len(edit_record) == 0:
             st.session_state.editing_id = None
             st.rerun()
-        st.session_state._edit_dialog_rendered = False
-        edit_dialog(edit_record.iloc[0], edit_id)
-        if not st.session_state._edit_dialog_rendered:
-            # 弹窗被 ✕ 关闭，函数体未执行 → 清空状态，防止重复弹出
+        req_ver = st.session_state.get("_edit_request_ver", 0)
+        if st.session_state.get("_edit_fulfilled_ver", 0) != req_ver:
+            # 版本未签收 → 这是新的编辑请求，展示弹窗
+            edit_dialog(edit_record.iloc[0], edit_id)
+        else:
+            # 版本已签收 → 弹窗展示过但被 ✕ 关闭 → 清空状态，不额外 rerun
             st.session_state.editing_id = None
-            st.rerun()
 
     # ---- 聊天式记账（微信风格：用户右，AI 左） ----
     today_start_dt = datetime.combine(now_cn().date(), datetime.min.time())
@@ -745,6 +747,7 @@ if page == "🧾 记账":
                     with btn_l:
                         if st.button("✏️\n编辑", key=f"chat_edit_{rec_id}", use_container_width=True):
                             st.session_state.editing_id = rec_id
+                            st.session_state._edit_request_ver = st.session_state.get("_edit_request_ver", 0) + 1
                             st.rerun()
                     with btn_r:
                         if st.button("🗑️\n删除", key=f"chat_del_{rec_id}", use_container_width=True):
@@ -874,12 +877,13 @@ elif page == "📋 历史记账":
             if len(edit_record) == 0:
                 st.session_state.editing_id = None
                 st.rerun()
-            st.session_state._edit_dialog_rendered = False
-            edit_dialog(edit_record.iloc[0], edit_id)
-            if not st.session_state._edit_dialog_rendered:
-                # 弹窗被 ✕ 关闭，函数体未执行 → 清空状态，防止重复弹出
+            req_ver = st.session_state.get("_edit_request_ver", 0)
+            if st.session_state.get("_edit_fulfilled_ver", 0) != req_ver:
+                # 版本未签收 → 这是新的编辑请求，展示弹窗
+                edit_dialog(edit_record.iloc[0], edit_id)
+            else:
+                # 版本已签收 → 弹窗展示过但被 ✕ 关闭 → 清空状态，不额外 rerun
                 st.session_state.editing_id = None
-                st.rerun()
 
         # ---- 删除确认弹窗 ----
         if st.session_state.confirm_delete_id:
@@ -906,8 +910,8 @@ elif page == "📋 历史记账":
                             st.session_state.confirm_delete_id = None
                             st.rerun()
 
-        # ---- 筛选数据（编辑和删除确认时不显示列表） ----
-        if not st.session_state.editing_id and not st.session_state.confirm_delete_id:
+        # ---- 筛选数据 ----
+        if not st.session_state.confirm_delete_id:
             filtered_df = get_filtered_records(
                 records, start_date, end_date, record_type, main_category, search_text
             )
@@ -948,6 +952,7 @@ elif page == "📋 历史记账":
                         with r_col4:
                             if st.button("✏️", key=f"edit_{row['id']}", help="编辑此条记录"):
                                 st.session_state.editing_id = row['id']
+                                st.session_state._edit_request_ver = st.session_state.get("_edit_request_ver", 0) + 1
                                 st.rerun()
                         with r_col5:
                             if st.button("🗑️", key=f"del_{row['id']}", help="删除此条记录"):
