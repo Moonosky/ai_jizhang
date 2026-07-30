@@ -481,6 +481,9 @@ def update_record(record_id: str, new_data: dict):
 @st.dialog("✏️ 编辑记录", width="large")
 def edit_dialog(edit_row, edit_id):
     """编辑弹窗 - Streamlit 原生 Dialog，叠加在原界面上方"""
+    # 标记弹窗已渲染：如果 ✕ 关闭弹窗，函数体不执行，此标记为 False → 调用方可清空 editing_id
+    st.session_state._edit_dialog_rendered = True
+
     # ---- 金额 & 类型 ----
     col_a, col_b = st.columns(2)
     with col_a:
@@ -686,34 +689,12 @@ if page == "🧾 记账":
         if len(edit_record) == 0:
             st.session_state.editing_id = None
             st.rerun()
-        # JS：监听弹窗 ✕ 点击 → 同步点击弹窗内隐藏的"取消"按钮（复用其清空状态逻辑）
-        st.components.v1.html("""
-        <script>
-        (function() {
-            const doc = window.parent.document;
-            let lastX = null;
-            function bindX() {
-                const dlg = doc.querySelector('div[role="dialog"]');
-                if (!dlg) return;
-                const x = dlg.querySelector('button[aria-label="Close"]')
-                    || Array.from(dlg.querySelectorAll('button'))
-                        .find(b => b.innerText.trim() === '✕' || b.innerText.trim() === '×');
-                if (x && x !== lastX) {
-                    lastX = x;
-                    x.addEventListener('click', () => {
-                        // 在弹窗内找"取消"按钮并点击（它会清空 editing_id 并 rerun）
-                        const cancelBtn = Array.from(dlg.querySelectorAll('button'))
-                            .find(b => b.innerText.includes('取消'));
-                        if (cancelBtn) cancelBtn.click();
-                    }, true);
-                }
-            }
-            bindX();
-            new MutationObserver(bindX).observe(doc.body, { childList: true, subtree: true });
-        })();
-        </script>
-        """, height=0)
+        st.session_state._edit_dialog_rendered = False
         edit_dialog(edit_record.iloc[0], edit_id)
+        if not st.session_state._edit_dialog_rendered:
+            # 弹窗被 ✕ 关闭，函数体未执行 → 清空状态，防止重复弹出
+            st.session_state.editing_id = None
+            st.rerun()
 
     # ---- 聊天式记账（微信风格：用户右，AI 左） ----
     today_start_dt = datetime.combine(now_cn().date(), datetime.min.time())
@@ -893,33 +874,12 @@ elif page == "📋 历史记账":
             if len(edit_record) == 0:
                 st.session_state.editing_id = None
                 st.rerun()
-            # JS：监听弹窗 ✕ 点击 → 同步点击弹窗内"取消"按钮（与记账页同一逻辑）
-            st.components.v1.html("""
-            <script>
-            (function() {
-                const doc = window.parent.document;
-                let lastX = null;
-                function bindX() {
-                    const dlg = doc.querySelector('div[role="dialog"]');
-                    if (!dlg) return;
-                    const x = dlg.querySelector('button[aria-label="Close"]')
-                        || Array.from(dlg.querySelectorAll('button'))
-                            .find(b => b.innerText.trim() === '✕' || b.innerText.trim() === '×');
-                    if (x && x !== lastX) {
-                        lastX = x;
-                        x.addEventListener('click', () => {
-                            const cancelBtn = Array.from(dlg.querySelectorAll('button'))
-                                .find(b => b.innerText.includes('取消'));
-                            if (cancelBtn) cancelBtn.click();
-                        }, true);
-                    }
-                }
-                bindX();
-                new MutationObserver(bindX).observe(doc.body, { childList: true, subtree: true });
-            })();
-            </script>
-            """, height=0)
+            st.session_state._edit_dialog_rendered = False
             edit_dialog(edit_record.iloc[0], edit_id)
+            if not st.session_state._edit_dialog_rendered:
+                # 弹窗被 ✕ 关闭，函数体未执行 → 清空状态，防止重复弹出
+                st.session_state.editing_id = None
+                st.rerun()
 
         # ---- 删除确认弹窗 ----
         if st.session_state.confirm_delete_id:
