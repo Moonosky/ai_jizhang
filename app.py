@@ -21,6 +21,46 @@ st.set_page_config(
     layout="wide"
 )
 
+# 让按钮支持多行文字（emoji在上，文字在下）
+st.html("""
+<style>
+.stButton button {
+    white-space: pre-line !important;
+    line-height: 1.3 !important;
+}
+</style>
+""")
+
+# 滚动位置记忆：rerun 后恢复主区域滚动位置，避免聊天区"跳动"
+st.components.v1.html("""
+<script>
+(function() {
+    const KEY = "__scroll_memory__";
+    const doc = window.parent.document;
+    const win = window.parent;
+    // 页面加载完成后恢复滚动位置
+    if (win[KEY] !== undefined) {
+        const target = win[KEY];
+        win[KEY] = undefined;
+        // 等 DOM 渲染完再恢复
+        setTimeout(() => {
+            const main = doc.querySelector('section.main')
+                      || doc.querySelector('[data-testid="stAppViewContainer"]')
+                      || doc.documentElement;
+            if (main) main.scrollTop = target;
+            win.scrollTo(0, target);
+        }, 100);
+    }
+    // 页面即将 rerun（卸载）前记录滚动位置
+    win.addEventListener('beforeunload', () => {
+        const main = doc.querySelector('section.main')
+                  || doc.querySelector('[data-testid="stAppViewContainer"]');
+        win[KEY] = main ? main.scrollTop : win.scrollY;
+    });
+})();
+</script>
+""", height=0)
+
 # ============================================================
 # 分类体系（产品方案定义的二级结构）
 # ============================================================
@@ -89,6 +129,10 @@ SYSTEM_PROMPT = f"""你是一个专业的记账助手。用户会用自然语言
 
 输入："昨天买奶茶18块"
 输出：{{"amount": 18.00, "type": "支出", "category_sub": "🥤 奶茶咖啡", "note": "买奶茶", "date_offset": -1}}
+
+## 无法解析时
+- 如果用户没有提到具体金额，返回：{{"error": "no_amount"}}
+- 如果完全无法理解消费意图，返回：{{"error": "unknown"}}
 """
 
 
@@ -103,9 +147,28 @@ def get_client():
     )
 
 
+def _has_amount_hint(user_text: str) -> bool:
+    """预检：用户输入是否包含金额相关信息"""
+    # 阿拉伯数字
+    if re.search(r"\d+", user_text):
+        return True
+    # 中文数字
+    if re.search(r"[一二三四五六七八九十百千万两零]", user_text):
+        return True
+    # 金额单位
+    if re.search(r"[块元角分毛]", user_text):
+        return True
+    return False
+
+
 def parse_input(user_text: str, base_date: datetime = None) -> Optional[dict]:
     """调用 DeepSeek 解析用户输入，返回结构化数据或 None
     base_date: 用户选择的记账日期，未传则默认今天"""
+    # 预检：没有金额线索就不调 API，省钱且避免 AI 编造
+    if not _has_amount_hint(user_text):
+        st.session_state.parse_error = "no_amount"
+        return None
+
     client = get_client()
     if not client:
         return None
@@ -135,8 +198,21 @@ def parse_input(user_text: str, base_date: datetime = None) -> Optional[dict]:
 
         result = json.loads(raw)
 
+        # AI 返回错误信号：无法解析
+        if "error" in result:
+            if result["error"] == "no_amount":
+                st.session_state.parse_error = "no_amount"
+            else:
+                st.session_state.parse_error = "unknown"
+            return None
+
         # 校验必填字段
         if "amount" not in result or "type" not in result or "category_sub" not in result:
+            return None
+
+        # 金额为 0 或负数 → 视为无效，不记账
+        if float(result["amount"]) <= 0:
+            st.session_state.parse_error = "no_amount"
             return None
 
         # 处理时间
@@ -178,6 +254,7 @@ def parse_input(user_text: str, base_date: datetime = None) -> Optional[dict]:
 # 数据持久化：Supabase（云端主存储）+ JSON（本地备份）
 # ============================================================
 DATA_FILE = "records.json"
+CHAT_FILE = "chat_history.json"
 
 
 def get_supabase():
@@ -236,6 +313,17 @@ def _load_json():
         return None
 
 
+def _load_chat():
+    """从本地 JSON 加载聊天记录"""
+    if not os.path.exists(CHAT_FILE):
+        return []
+    try:
+        with open(CHAT_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, KeyError):
+        return []
+
+
 def _save_json(df=None):
     """保存 DataFrame 到本地 JSON（始终可用，作为备份）"""
     records = df.copy() if df is not None else st.session_state.records.copy()
@@ -246,6 +334,10 @@ def _save_json(df=None):
     data = records.to_dict(orient="records")
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    # 同时保存聊天记录
+    if "chat_history" in st.session_state:
+        with open(CHAT_FILE, "w", encoding="utf-8") as f:
+            json.dump(st.session_state.chat_history, f, ensure_ascii=False, indent=2)
 
 
 def _row_to_dict(row: dict) -> dict:
@@ -282,11 +374,17 @@ if "record_counter" not in st.session_state:
 if "error_msg" not in st.session_state:
     st.session_state.error_msg = None
 
+if "parse_error" not in st.session_state:
+    st.session_state.parse_error = None  # no_amount | unknown | None
+
 if "confirm_delete_id" not in st.session_state:
     st.session_state.confirm_delete_id = None
 
 if "last_added_id" not in st.session_state:
     st.session_state.last_added_id = None
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = _load_chat()  # [{user_text, record_id}]，持久化到JSON
 
 if "editing_id" not in st.session_state:
     st.session_state.editing_id = None
@@ -369,6 +467,99 @@ def update_record(record_id: str, new_data: dict):
                 records.at[idx, key] = value
         st.session_state.records = records
         _save_json()
+
+
+
+
+@st.dialog("✏️ 编辑记录", width="large")
+def edit_dialog(edit_row, edit_id):
+    """编辑弹窗 - Streamlit 原生 Dialog，叠加在原界面上方"""
+    # ---- 金额 & 类型 ----
+    col_a, col_b = st.columns(2)
+    with col_a:
+        new_amount = st.number_input(
+            "💰 金额", value=float(edit_row["amount"]),
+            min_value=0.01, step=0.01, format="%.2f",
+            key="dialog_amount"
+        )
+    with col_b:
+        new_type = st.radio(
+            "📌 类型", ["支出", "收入"],
+            index=0 if edit_row["type"] == "支出" else 1,
+            horizontal=True,
+            key="dialog_type"
+        )
+
+    # ---- 分类选择（根据类型过滤） ----
+    if new_type == "收入":
+        available_main = ["💰 收入"]
+    else:
+        available_main = [k for k in CATEGORY_MAP.keys() if k != "💰 收入"]
+
+    default_main = edit_row["category_main"]
+    if default_main not in available_main:
+        default_main = available_main[0]
+
+    col_c, col_d = st.columns(2)
+    with col_c:
+        new_main = st.selectbox(
+            "📂 一级分类",
+            available_main,
+            index=available_main.index(default_main),
+            key="dialog_main"
+        )
+    with col_d:
+        new_sub_list = CATEGORY_MAP[new_main]
+        default_sub = edit_row["category_sub"]
+        if default_sub not in new_sub_list:
+            default_sub = new_sub_list[0]
+        new_sub = st.selectbox(
+            "🏷️ 二级分类",
+            new_sub_list,
+            index=new_sub_list.index(default_sub),
+            key="dialog_sub"
+        )
+
+    # ---- 备注 ----
+    raw_note = edit_row["note"]
+    note_val = str(raw_note) if raw_note and str(raw_note) != "nan" else ""
+    new_note = st.text_input(
+        "📝 备注",
+        value=note_val,
+        key="dialog_note",
+        placeholder="选填，简短描述…"
+    )
+
+    # ---- 日期 & 时间 ----
+    ts = pd.to_datetime(edit_row["timestamp"])
+    col_e, col_f = st.columns(2)
+    with col_e:
+        new_date = st.date_input("📅 日期", value=ts.date(), key="dialog_date")
+    with col_f:
+        new_time = st.time_input("⏰ 时间", value=ts.time(), key="dialog_time")
+
+    st.divider()
+
+    # ---- 操作按钮 ----
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        if st.button("💾 保存修改", use_container_width=True,
+                     type="primary", key="dialog_save"):
+            update_record(edit_id, {
+                "amount": new_amount,
+                "type": new_type,
+                "category_main": new_main,
+                "category_sub": new_sub,
+                "note": new_note if new_note else "",
+                "timestamp": datetime.combine(new_date, new_time)
+            })
+            st.session_state.editing_id = None
+            st.rerun()
+    with btn_col2:
+        if st.button("↩️ 取消", use_container_width=True, key="dialog_cancel"):
+            st.session_state.editing_id = None
+            st.rerun()
+
 
 
 
@@ -481,103 +672,112 @@ if page == "🧾 记账":
 
     st.divider()
 
-    # ---- 编辑模式 ----
+    # ---- 编辑弹窗 ----
     if st.session_state.editing_id:
         edit_id = st.session_state.editing_id
         edit_record = records[records["id"] == edit_id]
         if len(edit_record) == 0:
             st.session_state.editing_id = None
             st.rerun()
-        edit_row = edit_record.iloc[0]
+        # JS：监听弹窗 ✕ 点击 → 同步点击弹窗内隐藏的"取消"按钮（复用其清空状态逻辑）
+        st.components.v1.html("""
+        <script>
+        (function() {
+            const doc = window.parent.document;
+            let lastX = null;
+            function bindX() {
+                const dlg = doc.querySelector('div[role="dialog"]');
+                if (!dlg) return;
+                const x = dlg.querySelector('button[aria-label="Close"]')
+                    || Array.from(dlg.querySelectorAll('button'))
+                        .find(b => b.innerText.trim() === '✕' || b.innerText.trim() === '×');
+                if (x && x !== lastX) {
+                    lastX = x;
+                    x.addEventListener('click', () => {
+                        // 在弹窗内找"取消"按钮并点击（它会清空 editing_id 并 rerun）
+                        const cancelBtn = Array.from(dlg.querySelectorAll('button'))
+                            .find(b => b.innerText.includes('取消'));
+                        if (cancelBtn) cancelBtn.click();
+                    }, true);
+                }
+            }
+            bindX();
+            new MutationObserver(bindX).observe(doc.body, { childList: true, subtree: true });
+        })();
+        </script>
+        """, height=0)
+        edit_dialog(edit_record.iloc[0], edit_id)
 
-        st.subheader("✏️ 修改这笔记录")
+    # ---- 聊天式记账（微信风格：用户右，AI 左） ----
+    today_start_dt = datetime.combine(datetime.now().date(), datetime.min.time())
+    today_records_list = records[pd.to_datetime(records["timestamp"]) >= today_start_dt]
 
-        new_amount = st.number_input(
-            "金额", value=float(edit_row["amount"]),
-            min_value=0.01, step=0.01, format="%.2f"
-        )
-        new_type = st.radio(
-            "类型", ["支出", "收入"],
-            index=0 if edit_row["type"] == "支出" else 1,
-            horizontal=True
-        )
-        main_categories = list(CATEGORY_MAP.keys())
-        default_main = (
-            main_categories.index(edit_row["category_main"])
-            if edit_row["category_main"] in main_categories else 0
-        )
-        new_main = st.selectbox("一级分类", main_categories, index=default_main)
-        new_sub_list = CATEGORY_MAP[new_main]
-        default_sub = (
-            new_sub_list.index(edit_row["category_sub"])
-            if edit_row["category_sub"] in new_sub_list else 0
-        )
-        new_sub = st.selectbox("二级分类", new_sub_list, index=default_sub)
-        new_note = st.text_input("备注", value=edit_row["note"] if edit_row["note"] else "")
-        ts = pd.to_datetime(edit_row["timestamp"])
-        date_col, time_col = st.columns(2)
-        with date_col:
-            new_date = st.date_input("日期", value=ts.date())
-        with time_col:
-            new_time = st.time_input("时间", value=ts.time())
+    if len(st.session_state.chat_history) > 0:
+        if len(today_records_list) > 0:
+            today_total = today_records_list[today_records_list["type"] == "支出"]["amount"].sum()
+            st.caption(f"📋 今日 · {len(today_records_list)}笔 · 支出 ¥{today_total:.2f}")
 
-        e_col1, e_col2 = st.columns(2)
-        with e_col1:
-            if st.button("💾 保存修改", use_container_width=True, type="primary"):
-                update_record(edit_id, {
-                    "amount": new_amount,
-                    "type": new_type,
-                    "category_main": new_main,
-                    "category_sub": new_sub,
-                    "note": new_note,
-                    "timestamp": datetime.combine(new_date, new_time)
-                })
-                st.session_state.editing_id = None
-                st.rerun()
-        with e_col2:
-            if st.button("↩️ 取消", use_container_width=True):
-                st.session_state.editing_id = None
-                st.rerun()
+        for ch in st.session_state.chat_history:
+            rec_id = ch["record_id"]
+            rec_match = records[records["id"] == rec_id]
+            if len(rec_match) == 0:
+                continue
+            row = rec_match.iloc[0]
+            r_ts = pd.to_datetime(row["timestamp"])
+            sign = "+" if row["type"] == "收入" else "-"
 
-    # ---- 最近入账结果卡片 ----
-    elif st.session_state.last_added_id:
-        last_id = st.session_state.last_added_id
-        last_record = records[records["id"] == last_id]
+            # 用户消息行（头像在右，气泡靠右）
+            _, msg_col, avatar_col = st.columns([3.3, 1.95, 0.25])
+            with msg_col:
+                st.html(f"""<div style="text-align:right;">
+                    <span style="display:inline-block;max-width:100%;text-align:left;
+                        background:#d4e6f1;border-radius:12px;padding:8px 14px;
+                        font-size:14px;color:#1a1a1a;word-break:break-word;line-height:1.5;
+                        border:1px solid #b8d4e3;">
+                        {ch["user_text"]}
+                    </span>
+                </div>""")
+            with avatar_col:
+                st.html("<div style='display:flex;justify-content:flex-end;'><div style='width:40px;height:40px;border-radius:50%;background:#07C160;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;'>我</div></div>")
 
-        if len(last_record) > 0:
-            last = last_record.iloc[0]
-            with st.container(border=True):
-                st.success("✅ 已入账")
-                card_a, card_b = st.columns(2)
-                with card_a:
-                    st.caption("💰 金额")
-                    st.markdown(f"#### ¥{float(last['amount']):.2f}")
-                    st.caption(f"📂 {last['category_sub']}")
-                with card_b:
-                    st.caption("📌 类型")
-                    st.markdown(f"#### {last['type']}")
-                    ts = pd.to_datetime(last["timestamp"])
-                    st.caption(f"🕐 {ts.strftime('%m月%d日 %H:%M')}")
-                if last["note"]:
-                    st.caption(f"📝 备注：{last['note']}")
-
-                btn_col1, btn_col2, _ = st.columns([1, 1, 4])
-                with btn_col1:
-                    if st.button("↩️ 撤销", key="undo_last_card", use_container_width=True):
-                        delete_record(last_id)
-                        st.session_state.last_added_id = None
-                        st.rerun()
-                with btn_col2:
-                    if st.button("✏️ 编辑", key="edit_last_card", use_container_width=True):
-                        st.session_state.editing_id = last_id
-                        st.rerun()
+            # AI 记账卡片行（头像在左，卡片靠左，间距对齐）
+            avatar_col2, card_col, _ = st.columns([0.25, 1.95, 3.3], gap="small")
+            with avatar_col2:
+                st.html("<div style='width:40px;height:40px;border-radius:50%;background:#1f77b4;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;'>AI</div>")
+            with card_col:
+                with st.container(border=True):
+                    st.caption(
+                        f"{sign}¥{float(row['amount']):.2f}  {row['category_sub']}  "
+                        f"🕐 {r_ts.strftime('%m月%d日 %H:%M')}"
+                    )
+                    note_text = row.get("note", "")
+                    if note_text:
+                        st.caption(f"📝 {note_text}")
+                    btn_l, btn_r, _ = st.columns([1.5, 1.5, 3], gap="small")
+                    with btn_l:
+                        if st.button("✏️\n编辑", key=f"chat_edit_{rec_id}", use_container_width=True):
+                            st.session_state.editing_id = rec_id
+                            st.rerun()
+                    with btn_r:
+                        if st.button("🗑️\n删除", key=f"chat_del_{rec_id}", use_container_width=True):
+                            delete_record(rec_id)
+                            st.session_state.chat_history = [
+                                c for c in st.session_state.chat_history
+                                if c["record_id"] != rec_id
+                            ]
+                            if st.session_state.last_added_id == rec_id:
+                                st.session_state.last_added_id = None
+                            _save_json()
+                            st.rerun()
+    else:
+        if len(records) == 0:
+            st.info("👋 欢迎使用AI记账！在下方输入框说一句话，AI帮你自动分类归档。")
+            st.caption("💡 试试说：午饭食堂35块 / 打车26.5 / 超市买了牛奶45")
+        elif len(today_records_list) > 0:
+            today_total = today_records_list[today_records_list["type"] == "支出"]["amount"].sum()
+            st.info(f"📋 已加载 {len(records)} 条记录 · 今日 {len(today_records_list)} 笔 · 支出 ¥{today_total:.2f}")
         else:
-            st.session_state.last_added_id = None
-
-    # ---- 引导提示 ----
-    if len(records) == 0:
-        st.info("👋 欢迎使用AI记账！在下方输入框说一句话，AI帮你自动分类归档。")
-        st.caption("💡 试试说：午饭食堂35块 / 打车26.5 / 超市买了牛奶45")
+            st.info(f"📋 已加载 {len(records)} 条记录，今天还没有新记录")
 
     # ---- 聊天输入框 ----
     user_input = st.chat_input("说说你今天花了什么钱...（如：午饭食堂35块）")
@@ -590,21 +790,46 @@ if page == "🧾 记账":
                 "本地运行时创建 `.streamlit/secrets.toml` 文件"
             )
         else:
-            with st.chat_message("user"):
-                st.write(user_input)
+            # 用户消息（右侧气泡，跟聊天历史统一布局）
+            _, msg_col, ava_col = st.columns([3.3, 1.95, 0.25])
+            with msg_col:
+                st.html(f"""<div style="text-align:right;">
+                    <span style="display:inline-block;max-width:100%;text-align:left;
+                        background:#d4e6f1;border-radius:12px;padding:8px 14px;
+                        font-size:14px;color:#1a1a1a;word-break:break-word;line-height:1.5;
+                        border:1px solid #b8d4e3;">
+                        {user_input}
+                    </span>
+                </div>""")
+            with ava_col:
+                st.html("<div style='display:flex;justify-content:flex-end;'><div style='width:40px;height:40px;border-radius:50%;background:#07C160;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;'>我</div></div>")
 
-            with st.spinner("🤔 AI 正在理解你的消费..."):
-                parsed = parse_input(user_input)
+            # AI 处理中 / 返回结果（左侧，间距对齐）
+            ava2, res_col, _ = st.columns([0.25, 1.95, 3.3], gap="small")
+            with ava2:
+                st.html("<div style='width:40px;height:40px;border-radius:50%;background:#1f77b4;color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:bold;'>AI</div>")
+            with res_col:
+                with st.spinner("🤔 AI 正在理解你的消费..."):
+                    parsed = parse_input(user_input)
 
-            if parsed is None:
-                with st.chat_message("assistant"):
-                    st.error("🤔 我没太理解，能换个说法吗？")
-                    st.caption("试试这样说：午饭35块 / 打车26.5 / 超市买了牛奶45")
-            else:
-                add_record(parsed)
-                new_id = f"rec_{st.session_state.record_counter:04d}"
-                st.session_state.last_added_id = new_id
-                st.rerun()
+                if parsed is None:
+                    err_type = st.session_state.get("parse_error")
+                    if err_type == "no_amount":
+                        st.warning("😅 没找到具体金额，这笔就不记了")
+                        st.caption("💡 请带上金额重新输入，比如：午饭35块 / 打车26.5")
+                    else:
+                        st.warning("😅 没太理解这笔消费，不记入账单")
+                        st.caption("💡 换个说法试试：午饭35块 / 打车26.5 / 超市买了牛奶45")
+                    st.session_state.parse_error = None
+                else:
+                    add_record(parsed)
+                    new_id = f"rec_{st.session_state.record_counter:04d}"
+                    st.session_state.chat_history.append({
+                        "user_text": user_input,
+                        "record_id": new_id,
+                    })
+                    _save_json()
+                    st.rerun()
 
 # ============================================================
 # 页面二：📋 历史记账
@@ -654,64 +879,40 @@ elif page == "📋 历史记账":
                     placeholder="输入关键词..."
                 )
 
-        # ---- 编辑表单 ----
+        # ---- 编辑弹窗 ----
         if st.session_state.editing_id:
             edit_id = st.session_state.editing_id
             edit_record = records[records["id"] == edit_id]
             if len(edit_record) == 0:
                 st.session_state.editing_id = None
                 st.rerun()
-            edit_row = edit_record.iloc[0]
-
-            st.subheader("✏️ 修改这笔记录")
-
-            new_amount = st.number_input(
-                "金额", value=float(edit_row["amount"]),
-                min_value=0.01, step=0.01, format="%.2f",
-                key="hist_edit_amount"
-            )
-            new_type = st.radio(
-                "类型", ["支出", "收入"],
-                index=0 if edit_row["type"] == "支出" else 1,
-                horizontal=True, key="hist_edit_type"
-            )
-            main_categories = list(CATEGORY_MAP.keys())
-            default_main = (
-                main_categories.index(edit_row["category_main"])
-                if edit_row["category_main"] in main_categories else 0
-            )
-            new_main = st.selectbox("一级分类", main_categories, index=default_main, key="hist_edit_main")
-            new_sub_list = CATEGORY_MAP[new_main]
-            default_sub = (
-                new_sub_list.index(edit_row["category_sub"])
-                if edit_row["category_sub"] in new_sub_list else 0
-            )
-            new_sub = st.selectbox("二级分类", new_sub_list, index=default_sub, key="hist_edit_sub")
-            new_note = st.text_input("备注", value=edit_row["note"] if edit_row["note"] else "", key="hist_edit_note")
-            ts = pd.to_datetime(edit_row["timestamp"])
-            date_col, time_col = st.columns(2)
-            with date_col:
-                new_date = st.date_input("日期", value=ts.date(), key="hist_edit_date")
-            with time_col:
-                new_time = st.time_input("时间", value=ts.time(), key="hist_edit_time")
-
-            e_col1, e_col2 = st.columns(2)
-            with e_col1:
-                if st.button("💾 保存修改", key="hist_edit_save", use_container_width=True, type="primary"):
-                    update_record(edit_id, {
-                        "amount": new_amount,
-                        "type": new_type,
-                        "category_main": new_main,
-                        "category_sub": new_sub,
-                        "note": new_note,
-                        "timestamp": datetime.combine(new_date, new_time)
-                    })
-                    st.session_state.editing_id = None
-                    st.rerun()
-            with e_col2:
-                if st.button("↩️ 取消", key="hist_edit_cancel", use_container_width=True):
-                    st.session_state.editing_id = None
-                    st.rerun()
+            # JS：监听弹窗 ✕ 点击 → 同步点击弹窗内"取消"按钮（与记账页同一逻辑）
+            st.components.v1.html("""
+            <script>
+            (function() {
+                const doc = window.parent.document;
+                let lastX = null;
+                function bindX() {
+                    const dlg = doc.querySelector('div[role="dialog"]');
+                    if (!dlg) return;
+                    const x = dlg.querySelector('button[aria-label="Close"]')
+                        || Array.from(dlg.querySelectorAll('button'))
+                            .find(b => b.innerText.trim() === '✕' || b.innerText.trim() === '×');
+                    if (x && x !== lastX) {
+                        lastX = x;
+                        x.addEventListener('click', () => {
+                            const cancelBtn = Array.from(dlg.querySelectorAll('button'))
+                                .find(b => b.innerText.includes('取消'));
+                            if (cancelBtn) cancelBtn.click();
+                        }, true);
+                    }
+                }
+                bindX();
+                new MutationObserver(bindX).observe(doc.body, { childList: true, subtree: true });
+            })();
+            </script>
+            """, height=0)
+            edit_dialog(edit_record.iloc[0], edit_id)
 
         # ---- 删除确认弹窗 ----
         if st.session_state.confirm_delete_id:
@@ -870,8 +1071,8 @@ elif page == "📊 记账统计":
         }
 
         with chart_col1:
-            # 分类支出饼图
-            st.subheader("📂 分类支出分布")
+            # 分类支出饼图（随时间段切换变化）
+            st.subheader(f"📂 分类支出分布 · {period_label}")
             if len(period_expense) > 0:
                 cat_data = period_expense.groupby("category_main")["amount"].sum()
                 fig_pie = go.Figure(data=[
@@ -879,17 +1080,22 @@ elif page == "📊 记账统计":
                         labels=cat_data.index.tolist(),
                         values=cat_data.values.tolist(),
                         hole=0.4,
-                        textinfo="label+percent",
-                        textposition="outside",
+                        textinfo="percent",
+                        textposition="inside",
+                        textfont=dict(size=12),
                         marker=dict(line=dict(color="white", width=1)),
                     )
                 ])
                 fig_pie.update_layout(
-                    margin=dict(t=10, b=10, l=10, r=10),
-                    height=350,
-                    showlegend=False,
+                    margin=dict(t=10, b=40, l=10, r=10),
+                    height=320,
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h", y=-0.08, x=0.5, xanchor="center",
+                        font=dict(size=11)
+                    ),
                 )
-                st.plotly_chart(fig_pie, use_container_width=True, config=chart_config)
+                st.plotly_chart(fig_pie, use_container_width=True, config=chart_config, key=f"pie_{period}")
             else:
                 st.info("该时间段无支出记录")
 
