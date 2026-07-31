@@ -437,8 +437,16 @@ def undo_last():
                 pass
 
         st.session_state.records = st.session_state.records.iloc[:-1]
-        st.session_state.record_counter -= 1
+        # 不递减 record_counter —— 像数据库自增主键一样，ID 永不复用，
+        # 防止聊天记录中的旧 ID 与新记录冲突导致 StreamlitDuplicateElementKey
         _save_json()
+
+        # 清理聊天记录中指向已删除记录的条目，避免孤立引用
+        if "chat_history" in st.session_state:
+            st.session_state.chat_history = [
+                c for c in st.session_state.chat_history
+                if c["record_id"] != last_id
+            ]
 
 
 def delete_record(record_id: str):
