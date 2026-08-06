@@ -38,35 +38,6 @@ st.html("""
 </style>
 """)
 
-# 滚动位置记忆：rerun 后恢复主区域滚动位置，避免聊天区"跳动"
-st.components.v1.html("""
-<script>
-(function() {
-    const KEY = "__scroll_memory__";
-    const doc = window.parent.document;
-    const win = window.parent;
-    // 页面加载完成后恢复滚动位置
-    if (win[KEY] !== undefined) {
-        const target = win[KEY];
-        win[KEY] = undefined;
-        // 等 DOM 渲染完再恢复
-        setTimeout(() => {
-            const main = doc.querySelector('section.main')
-                      || doc.querySelector('[data-testid="stAppViewContainer"]')
-                      || doc.documentElement;
-            if (main) main.scrollTop = target;
-            win.scrollTo(0, target);
-        }, 100);
-    }
-    // 页面即将 rerun（卸载）前记录滚动位置
-    win.addEventListener('beforeunload', () => {
-        const main = doc.querySelector('section.main')
-                  || doc.querySelector('[data-testid="stAppViewContainer"]');
-        win[KEY] = main ? main.scrollTop : win.scrollY;
-    });
-})();
-</script>
-""", height=0)
 
 # ============================================================
 # 分类体系（产品方案定义的二级结构）
